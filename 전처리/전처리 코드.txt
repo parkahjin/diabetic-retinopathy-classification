@@ -1,0 +1,300 @@
+# ===================================================================
+# Cell 2: 데이터 로드 및 Train/Val 분할
+# ===================================================================
+
+# 데이터 경로 설정
+DATA_DIR = '/kaggle/input/diabetic-retinopathy-resized'
+TRAIN_DIR = f'{DATA_DIR}/resized_train/resized_train'
+LABELS_FILE = f'{DATA_DIR}/trainLabels.csv'
+
+# 레이블 로드
+print("📂 레이블 파일 로드 중...")
+labels_df = pd.read_csv(LABELS_FILE)
+print(f"   총 데이터 개수: {len(labels_df):,}개")
+
+# 2-class 변환 (0 = 정상, 1-4 = 비정상)
+labels_df['binary_label'] = labels_df['level'].apply(lambda x: 0 if x == 0 else 1)
+
+# 클래스 분포 확인
+print("\n📊 원본 5-class 분포:")
+print(labels_df['level'].value_counts().sort_index())
+
+print("\n📊 2-class 변환 후 분포:")
+class_counts = labels_df['binary_label'].value_counts().sort_index()
+print(f"   정상 (0): {class_counts[0]:,}개 ({class_counts[0]/len(labels_df)*100:.1f}%)")
+print(f"   비정상 (1): {class_counts[1]:,}개 ({class_counts[1]/len(labels_df)*100:.1f}%)")
+print(f"   불균형 비율: {class_counts[0]/class_counts[1]:.2f}:1")
+
+# Train/Val 분할 (80/20, Stratified)
+train_df, val_df = train_test_split(
+    labels_df,
+    test_size=0.2,
+    stratify=labels_df['binary_label'],
+    random_state=SEED
+)
+
+print(f"\n✂️ Train/Val 분할 완료!")
+print(f"   Train: {len(train_df):,}개")
+print(f"   Val: {len(val_df):,}개")
+
+print("\n📊 Train 클래스 분포:")
+train_counts = train_df['binary_label'].value_counts().sort_index()
+print(f"   정상 (0): {train_counts[0]:,}개")
+print(f"   비정상 (1): {train_counts[1]:,}개")
+
+print("\n📊 Val 클래스 분포:")
+val_counts = val_df['binary_label'].value_counts().sort_index()
+print(f"   정상 (0): {val_counts[0]:,}개")
+print(f"   비정상 (1): {val_counts[1]:,}개")
+
+print("\n" + "="*60)
+print("✅ 데이터 로드 완료!")
+print("="*60)
+# ===================================================================
+# Cell 3: 오버샘플링 (1:1 비율 맞추기)
+# ===================================================================
+
+print("🔄 오버샘플링 시작...")
+print(f"   현재 Train 데이터: {len(train_df):,}개\n")
+
+# 클래스별로 분리
+normal_df = train_df[train_df['binary_label'] == 0]      # 정상
+abnormal_df = train_df[train_df['binary_label'] == 1]    # 비정상
+
+print(f"   정상 (0): {len(normal_df):,}개")
+print(f"   비정상 (1): {len(abnormal_df):,}개")
+print(f"   불균형 비율: {len(normal_df)/len(abnormal_df):.2f}:1\n")
+
+# 비정상 클래스 오버샘플링 (정상 개수만큼 복제)
+target_count = len(normal_df)
+print(f"🎯 목표: 비정상 클래스를 {target_count:,}개로 늘리기")
+
+# 복제 (replace=True: 중복 허용)
+abnormal_oversampled = abnormal_df.sample(
+    n=target_count, 
+    replace=True, 
+    random_state=SEED
+)
+
+print(f"   오버샘플링 후 비정상: {len(abnormal_oversampled):,}개")
+
+# 합치기
+train_balanced = pd.concat([normal_df, abnormal_oversampled], axis=0)
+
+# 섞기 (중요!)
+train_balanced = train_balanced.sample(frac=1, random_state=SEED).reset_index(drop=True)
+
+print(f"\n✅ 오버샘플링 완료!")
+print(f"   최종 Train 데이터: {len(train_balanced):,}개")
+
+# 최종 분포 확인
+final_counts = train_balanced['binary_label'].value_counts().sort_index()
+print(f"\n📊 최종 Train 클래스 분포:")
+print(f"   정상 (0): {final_counts[0]:,}개 ({final_counts[0]/len(train_balanced)*100:.1f}%)")
+print(f"   비정상 (1): {final_counts[1]:,}개 ({final_counts[1]/len(train_balanced)*100:.1f}%)")
+print(f"   균형 비율: {final_counts[0]/final_counts[1]:.2f}:1 ← 완벽한 균형! ✅")
+
+print(f"\n📊 Val 클래스 분포 (변경 없음):")
+print(f"   정상 (0): {val_counts[0]:,}개")
+print(f"   비정상 (1): {val_counts[1]:,}개")
+
+print("\n" + "="*60)
+print("✅ 오버샘플링 완료!")
+print("="*60)
+# ===================================================================
+# Cell 4: 전처리 함수 정의
+# ===================================================================
+
+# 설정값
+IMG_SIZE = 96
+
+def preprocess_image(image_path):
+    """
+    CLAHE 전처리 + 리사이즈 + 정규화
+    
+    Args:
+        image_path: 이미지 파일 경로
+    
+    Returns:
+        전처리된 이미지 (128, 128, 3), 값 범위 [0, 1]
+    """
+    try:
+        # 1. 이미지 로드
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"이미지 로드 실패: {image_path}")
+        
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # 2. CLAHE
+        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l)
+        
+        lab_clahe = cv2.merge([l_clahe, a, b])
+        img_clahe = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2RGB)
+        
+        # 3. 리사이즈 (128x128)
+        img_resized = cv2.resize(img_clahe, (IMG_SIZE, IMG_SIZE))
+        
+        # 4. 정규화
+        img_normalized = img_resized.astype(np.float32) / 255.0
+        
+        return img_normalized
+    
+    except Exception as e:
+        print(f"❌ 전처리 실패: {image_path} - {str(e)}")
+        return np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+
+
+# 테스트
+print("🧪 전처리 함수 테스트...")
+test_image_name = train_balanced.iloc[0]['image']
+test_image_path = f"{TRAIN_DIR}/{test_image_name}.jpeg"
+
+print(f"   테스트 이미지: {test_image_name}.jpeg")
+
+if os.path.exists(test_image_path):
+    test_img = preprocess_image(test_image_path)
+    print(f"   ✅ 전처리 성공!")
+    print(f"      - Shape: {test_img.shape}")
+    print(f"      - Dtype: {test_img.dtype}")
+    print(f"      - Min: {test_img.min():.3f}, Max: {test_img.max():.3f}")
+    print(f"      - Mean: {test_img.mean():.3f}")
+else:
+    print(f"   ⚠️ 테스트 이미지를 찾을 수 없습니다")
+
+print("\n" + "="*60)
+print("✅ 전처리 함수 정의 완료!")
+print("="*60)
+# ===================================================================
+# Cell 5: 전처리 실행 (메모리 안전 버전)
+# ===================================================================
+
+print("🚀 전처리 시작!\n")
+print("⏱️ 예상 소요 시간: 7-10분")
+print("=" * 60)
+
+# ===== Train 데이터 전처리 =====
+print("\n📦 Train 데이터 전처리 중...")
+print(f"   총 {len(train_balanced):,}개 이미지")
+
+X_train = []
+y_train = []
+
+for idx, row in tqdm(train_balanced.iterrows(), 
+                     total=len(train_balanced), 
+                     desc="Train 전처리"):
+    image_name = row['image']
+    label = row['binary_label']
+    image_path = f"{TRAIN_DIR}/{image_name}.jpeg"
+    
+    img = preprocess_image(image_path)
+    X_train.append(img)
+    y_train.append(label)
+
+X_train = np.array(X_train, dtype=np.float32)
+y_train = np.array(y_train, dtype=np.float32)
+
+print(f"\n✅ Train 전처리 완료!")
+print(f"   X_train shape: {X_train.shape}")
+print(f"   y_train shape: {y_train.shape}")
+print(f"   메모리 사용량: {X_train.nbytes / (1024**3):.2f} GB")
+
+# ===== Val 데이터 전처리 =====
+print("\n📦 Val 데이터 전처리 중...")
+print(f"   총 {len(val_df):,}개 이미지")
+
+X_val = []
+y_val = []
+
+for idx, row in tqdm(val_df.iterrows(), 
+                     total=len(val_df), 
+                     desc="Val 전처리"):
+    image_name = row['image']
+    label = row['binary_label']
+    image_path = f"{TRAIN_DIR}/{image_name}.jpeg"
+    
+    img = preprocess_image(image_path)
+    X_val.append(img)
+    y_val.append(label)
+
+X_val = np.array(X_val, dtype=np.float32)
+y_val = np.array(y_val, dtype=np.float32)
+
+print(f"\n✅ Val 전처리 완료!")
+print(f"   X_val shape: {X_val.shape}")
+print(f"   y_val shape: {y_val.shape}")
+print(f"   메모리 사용량: {X_val.nbytes / (1024**3):.2f} GB")
+
+# ===== 최종 확인 =====
+print("\n" + "=" * 60)
+print("📊 전처리 최종 요약")
+print("=" * 60)
+print(f"Train: {X_train.shape[0]:,}개 이미지")
+print(f"   - 정상: {np.sum(y_train == 0):,}개")
+print(f"   - 비정상: {np.sum(y_train == 1):,}개")
+print(f"\nVal: {X_val.shape[0]:,}개 이미지")
+print(f"   - 정상: {np.sum(y_val == 0):,}개")
+print(f"   - 비정상: {np.sum(y_val == 1):,}개")
+print(f"\n총 메모리 사용량: {(X_train.nbytes + X_val.nbytes) / (1024**3):.2f} GB")
+
+# ===================================================================
+# 🆕 안전한 저장 (메모리 정리 포함)
+# ===================================================================
+
+print("\n" + "=" * 60)
+print("💾 전처리 데이터 저장 중 (안전 모드)...")
+print("=" * 60)
+
+import gc
+
+# 1. 가비지 컬렉션으로 메모리 정리
+print("\n🧹 메모리 정리 중...")
+gc.collect()
+print("✅ 메모리 정리 완료")
+
+# 2. 하나씩 저장 (진행 상황 확인)
+print("\n💾 X_train 저장 중...")
+np.save('X_train.npy', X_train)
+print(f"   ✅ X_train.npy 저장 완료 ({X_train.nbytes / (1024**3):.2f} GB)")
+
+print("💾 y_train 저장 중...")
+np.save('y_train.npy', y_train)
+print(f"   ✅ y_train.npy 저장 완료 ({y_train.nbytes / (1024**3):.2f} GB)")
+
+print("💾 X_val 저장 중...")
+np.save('X_val.npy', X_val)
+print(f"   ✅ X_val.npy 저장 완료 ({X_val.nbytes / (1024**3):.2f} GB)")
+
+print("💾 y_val 저장 중...")
+np.save('y_val.npy', y_val)
+print(f"   ✅ y_val.npy 저장 완료 ({y_val.nbytes / (1024**3):.2f} GB)")
+
+# 3. 저장 완료 확인
+print("\n🔍 저장 파일 확인 중...")
+import os
+files = ['X_train.npy', 'y_train.npy', 'X_val.npy', 'y_val.npy']
+all_saved = True
+
+for f in files:
+    if os.path.exists(f):
+        size = os.path.getsize(f) / (1024**3)
+        print(f"   ✅ {f}: {size:.2f} GB")
+    else:
+        print(f"   ❌ {f}: 저장 실패!")
+        all_saved = False
+
+if all_saved:
+    print("\n🎉 모든 파일 저장 성공!")
+else:
+    print("\n⚠️ 일부 파일 저장 실패!")
+
+print(f"\n💡 총 저장 용량: {(X_train.nbytes + y_train.nbytes + X_val.nbytes + y_val.nbytes) / (1024**3):.2f} GB")
+print("💡 다음번 Kernel 재시작 시 15초만에 로드 가능!")
+
+print("\n" + "=" * 60)
+print("✅ 모든 전처리 완료! 데이터가 메모리에 준비되었습니다!")
+print("=" * 60)
